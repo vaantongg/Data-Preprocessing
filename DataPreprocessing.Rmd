@@ -1,0 +1,414 @@
+---
+title: "Data Preprocessing"
+author: "Van Tong"
+date: "05/06/2022"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    fig_width: 10
+    fig_height: 7
+    toc: yes
+    toc_float: yes
+    theme: yeti
+    highlight: kate
+    warning: no
+---
+
+# Set up
+
+```{r setup, include=FALSE, eval=F}
+knitr::opts_chunk$set(echo = TRUE)
+
+knitr::opts_knit$set(warning = FALSE, message = FALSE)
+
+library(tidyverse)
+`%ni%` <- Negate(`%in%`)  # create negation of %in% function (i.e., not in)
+
+# set up
+dataFile <- "confidential_file.csv"
+dataDir <- file.path("..", "data")
+outDir <- file.path(dataDir, "preprocessed")
+
+# create output directory
+if (!dir.exists(outDir)) {
+  dir.create(outDir, recursive = T)
+}
+
+# plot customization
+plot.custom <- theme(
+    panel.background= element_rect(fill=NA), # transparent panel
+    plot.background = element_rect(fill=NA, colour=NA), #transparent background
+    panel.grid=element_blank(), # remove panel grid
+    axis.ticks.x=element_blank(), # remove tick marks on x-axis
+    axis.ticks=element_line(colour="gray70"), # change colour of tick marks
+    panel.border = element_rect(fill="transparent", colour="gray70"), # change panel border colour
+    legend.background = element_rect(fill = "transparent", colour = "transparent"), # change legend background
+    axis.text = element_text(color="gray20"),
+    axis.text.x = element_text(size=12),
+    text=element_text(size=12),
+    axis.title.y = element_text(vjust=1.5),
+    strip.background = element_rect(fill = "transparent", colour="grey70"),
+    legend.key = element_rect(fill = "transparent", colour = "transparent")
+    # ,legend.position="none"
+  )
+```
+
+# Prepare data
+
+```{r, message=F, warning=F, eval=F}
+dat <- read_csv(file.path(dataDir, "raw", dataFile), col_types = cols()) %>%
+  # remove extra header rows
+  filter(row_number() %ni% c(1,2)) %>%
+  rename(scenario=Scenario, condition=Condition) %>%
+  mutate(StartDate = as.POSIXct(StartDate, format = "%Y-%m-%d %H:%M:%S"),
+         EndDate = as.POSIXct(EndDate, format = "%Y-%m-%d %H:%M:%S")) %>%
+  arrange(StartDate) %>%
+  # remove test runs (by dropping psid's that were tests or NAs)
+  filter(!is.na(psid) & psid %ni% c("KDNljadncQ", "dkvnnvjNAD", "bdsvhbqebv"))
+
+# Participants who have a condition assigned of NA got filtered out before
+# completing the survey based on their demographic responses
+message(paste0("Number of participants filtered out by demographics: ",
+               sum(is.na(dat$condition))))
+dropped_subjects <- dat %>%
+  filter(is.na(condition)) %>%
+  mutate(exclusion = "demographics") %>%
+  select(ResponseId, exclusion)
+dat <- filter(dat, !is.na(condition))
+
+# some participants gave a wrong response based on the scenario they were
+# assigned to and exited the survey at that point
+# identify those subjects by finding the ones with a wrong response and all
+# missing responses for the questions that would've come after
+excl_wrongResp_exit <- dat %>%
+  select(ResponseId, QID124, QID125, QID127, QID128, QID129, Q85, Q86, Q80, Q81,
+         Q82, Q92, Q93, Q94, Q95, Q96, Q97, Q98, Q99, Q100, Q101, Q105, Q106,
+         Q107, Q108, Q109, Q110, Q111, Q112, Q113, Q114, Q116, Q117, Q118, Q119,
+         Q120, Q121, Q122, Q123, Q124, Q125,
+         `Wrong answer CC`:`Wrong answer TT`) %>%
+  mutate_at(vars(QID124:Q125), function(x) as.numeric(!is.na(x))) %>%
+  mutate_at(vars(`Wrong answer CC`:`Wrong answer TT`), as.numeric) %>%
+  rowwise() %>%
+  mutate(wrongResp = sum(c(`Wrong answer CC`, `Wrong answer TC`,
+                                  `Wrong answer CT`, `Wrong answer TT`),
+                                na.rm = T) > 0,
+         allMissing = sum(c(QID124, QID125, QID127, QID128, QID129, Q85, Q86,
+                            Q80, Q81, Q82, Q92, Q93, Q94, Q95, Q96, Q97, Q98,
+                            Q99, Q100, Q101, Q105, Q106, Q107, Q108, Q109, Q110,
+                            Q111, Q112, Q113, Q114, Q116, Q117, Q118, Q119,
+                            Q120, Q121, Q122, Q123, Q124, Q125)) == 0) %>%
+  ungroup() %>%
+  filter(wrongResp & allMissing) %>%
+  pull(ResponseId)
+message(paste0("Number of participants filtered out by scenario manipulation ",
+               "check: ", length(excl_wrongResp_exit)))
+dropped_subjects <- bind_rows(dropped_subjects,
+                              tibble(ResponseId = excl_wrongResp_exit,
+                                     exclusion = "wrong_response"))
+# # don't drop these subjects because we want to be able to classify what their
+# # wrong response was
+# dat <- filter(dat, ResponseId %ni% excl_wrongResp_filter)
+
+# code subjects who gave a wrong response and then exited the survey
+dat <- dat %>%
+  mutate(wrongResp_exit = as.numeric(ResponseId %in% excl_wrongResp_exit))
+
+# split by condition to make it easier to remove all the NA columns that
+# Qualtrics produces
+dat <- dat %>%
+  group_by(condition) %>%
+  group_split()
+```
+
+# Clean data
+
+```{r, message=F, warning=F, eval=F}
+dat <- lapply(dat, function(x){
+  # remove NA columns & rename some columns
+  output <- x %>%
+    select_if(sapply(., function(x) !all(is.na(x))) |
+                `%in%`(names(.), c("ResponseId", "Q175", "Q175_4_TEXT", "Q176",
+                                   "Q177", "Q178", "Q179", "Q2", "Q126", "Q128",
+                                   "Q130", "Q131", "Q132", "Q46", "Q47", "Q48",
+                                   "Q49"))) %>%
+    rename(subject=ResponseId, var1=Q175, var1_describe=Q175_4_TEXT,
+           var2=Q176, age=Q177, var3=Q178, var4=Q179, var5=Q2,
+           var6=Q126, var7=Q128, var8=Q130, var9=Q131, var10=Q132,
+           var11=Q46, var12=Q47, var13=Q48,
+           var14=Q49, startTime=StartDate, endTime=EndDate) %>%
+    rename_with(stringr::str_replace, pattern = "Wrong[[:space:]]answer.*",
+                replacement = "wrongResp")
+  
+  # because the same DVs have differently named columns per condition, variable
+  # renaming has to differ by condition
+
+# CC ----------------------------------------------------------------------
+  if (unique(x$condition) == "CC") {
+    # there are two possible columns for plan_choice in the CC condition, so
+    # first make sure they both exist and then combine them into one
+    if ("Q8" %ni% names(output)) {
+      output <- mutate(output, Q8 = NA)
+    }
+    if ("Q10" %ni% names(output)) {
+      output <- mutate(output, Q10 = NA)
+    }
+    
+    output <- output %>%
+      # combine the plan choice columns
+      mutate(plan_choice = ifelse(!is.na(Q8), Q8, Q10)) %>%
+      select(-Q8, -Q10) %>%
+      rename(var15=QID124, var16=QID125, var17=QID127,
+             var18=QID128, var19=QID129, var20=Q85,
+             var21=Q86, var22=Q80,
+             var23=Q81, var24=Q82,
+             var25=Q11, var26=Q6) %>%
+      mutate(principal_withdraw_amt = NA,  # no withdrawal amount question in CC
+             var27 = NA,
+             var28 = NA,
+             plan_choice = as.numeric(plan_choice),
+             plan_choice = case_when(plan_choice == 1 ~ "advantage plan",
+                                     plan_choice == 2 ~ "individual plan",
+                                     TRUE ~ NA_character_),
+             var25 = as.numeric(var25),
+             var25 = case_when(var25 == 1 ~ "beneficiary lump sum",
+                                          var25 == 2 ~ "beneficiary payments",
+                                          var25 == 3 ~ "withdraw to bank",
+                                          var25 == 4 ~ "custom payments",
+                                          TRUE ~ NA_character_))
+
+# TC ----------------------------------------------------------------------
+  } else if (unique(x$condition) == "TC") {
+    output <- output %>%
+      rename(var15=Q92, var16=Q93, var17=Q94, var18=Q95,
+             var19=Q96, var20=Q97, var21=Q98,
+             var22=Q99, var23=Q100,
+             var24=Q101, var25=Q20, var26=Q12,
+             var27=Q13, var28=Q16) %>%
+      mutate(plan_choice = case_when(var26 == "1" |
+                                       (var26 == "2" & var28 %in% c("1","2")) ~ "advantage plan",
+                                     var26 == "2" & var28 == "3" ~ "individual plan",
+                                     TRUE ~ NA_character_),
+             principal_withdraw_amt = NA,  # no withdrawal amount question in TC
+             var25 = as.numeric(var25),
+             var25 = case_when(var25 == 1 ~ "beneficiary lump sum",
+                                          var25 == 2 ~ "beneficiary payments",
+                                          var25 == 3 ~ "withdraw to bank",
+                                          var25 == 4 ~ "custom payments",
+                                          TRUE ~ NA_character_))
+    
+# CT ----------------------------------------------------------------------
+  } else if (unique(x$condition) == "CT") {
+    # there are two possible columns for plan_choice in the CT condition, so
+    # first make sure they both exist and then combine them into one
+    if ("Q23" %ni% names(output)) {
+      output <- mutate(output, Q23 = NA)
+    }
+    if ("Q151" %ni% names(output)) {
+      output <- mutate(output, Q151 = NA)
+    }
+    
+    # also ensure that the principal withdrawal amount column exists
+    # (it can get filtered for being all NA above)
+    if ("Q28_1" %ni% names(output)) {
+      output <- mutate(output, Q28_1 = NA)
+    }
+    
+    output <- output %>%
+      # combine the plan choice columns
+      mutate(plan_choice = ifelse(!is.na(Q23), Q23, Q151)) %>%
+      select(-Q23, -Q151) %>%
+      rename(var15=Q105, var16=Q106, var17=Q107,
+             var18=Q108, var19=Q109, var20=Q110,
+             var21=Q111, var22=Q112,
+             var23=Q113, var24=Q114,
+             var25=Q26, principal_withdraw_amt=Q28_1,
+             var26=Q21) %>%
+      mutate(var27 = NA,
+             var28 = NA,
+             plan_choice = as.numeric(plan_choice),
+             plan_choice = case_when(plan_choice == 1 ~ "advantage plan",
+                                     plan_choice == 2 ~ "individual plan",
+                                     TRUE ~ NA_character_),
+             var25 = as.numeric(var25),
+             var25 = case_when(var25 == 1 ~ "collect all",
+                                          var25 == 2 ~ "collect some",
+                                          var25 == 3 ~ "collect none",
+                                          TRUE ~ NA_character_),
+             principal_withdraw_amt = as.numeric(principal_withdraw_amt),
+             # if collect all, withdrawal is full principal (i.e., $20,000)
+             # if collect none, withdrawal is $0
+             principal_withdraw_amt = case_when(var25 == "collect all" ~ 20000,
+                                                var25 == "collect none" ~ 0,
+                                                TRUE ~ principal_withdraw_amt))
+
+# TT ----------------------------------------------------------------------
+  } else if (unique(x$condition) == "TT") {
+    # ensure that the principal withdrawal amount column exists
+    # (it can get filtered for being all NA above)
+    if ("Q40_1" %ni% names(output)) {
+      output <- mutate(output, Q40_1 = NA)
+    }
+    
+    output <- output %>%
+      rename(var15=Q116, var16=Q117, var17=Q118,
+             var18=Q119, var19=Q120, var20=Q121,
+             var21=Q122, var22=Q123,
+             var23=Q124, var24=Q125,
+             var25=Q38, principal_withdraw_amt=Q40_1,
+             var26=Q30, var27=Q31, var28=Q34) %>%
+      mutate(plan_choice = case_when(var26 == "1" |
+                                       (var26 == "2" & var28 %in% c("1","2")) ~ "advantage plan",
+                                     var26 == "2" & var28 == "3" ~ "individual plan",
+                                     TRUE ~ NA_character_),
+             var25 = as.numeric(var25),
+             var25 = case_when(var25 == 1 ~ "collect all",
+                                          var25 == 2 ~ "collect some",
+                                          var25 == 3 ~ "collect none",
+                                          TRUE ~ NA_character_),
+             principal_withdraw_amt = as.numeric(principal_withdraw_amt),
+             # if collect all, withdrawal is full principal (i.e., $20,000)
+             # if collect none, withdrawal is $0
+             principal_withdraw_amt = case_when(var25 == "collect all" ~ 20000,
+                                                var25 == "collect none" ~ 0,
+                                                TRUE ~ principal_withdraw_amt))
+  }
+  
+  output <- select(output, subject, startTime, endTime, scenario, condition,
+                   matches("p.*[NeedHelp|SE]_"), var1, var1_describe,
+                   age, var2, var3, var4, var5,
+                   contains("ease_"), contains("trust_"),
+                   contains("comprehend_"), plan_choice, var25,
+                   principal_withdraw_amt, wrongResp, wrongResp_exit,
+                   var26, var27, var28)
+  
+  return(output)
+}) %>%
+  bind_rows() %>%
+  # create separate factors for manipulations to the plan choice and the
+  # principal choice
+  mutate(plan_cond = case_when(condition %in% c("CC", "CT") ~ "control",
+                               condition %in% c("TC", "TT") ~ "treat"),
+         principal_cond = case_when(condition %in% c("CC", "TC") ~ "control",
+                                    condition %in% c("CT", "TT") ~ "treat"),
+         # create more informative scenario condition names
+         scenario = factor(scenario, levels = c("1", "2", "3"),
+                           labels = c("4 years certain", "3 years certain",
+                                      "3 years uncertain")),
+         # label child plan responses contingent on prototype condition because
+         # the response options differed
+         var26 = case_when(plan_cond == "control" & var26 == "1" ~ "one year",
+                                  plan_cond == "control" & var26 == "2" ~ "two years",
+                                  plan_cond == "control" & var26 == "3" ~ "three years",
+                                  plan_cond == "control" & var26 == "4" ~ "four or more years",
+                                  plan_cond == "control" & var26 == "5" ~ "still deciding",
+                                  plan_cond == "control" & var26 == "6" ~ "not planning to attend",
+                                  plan_cond == "treat" & var26 == "1" ~ "yes",
+                                  plan_cond == "treat" & var26 == "2" ~ "no",
+                                  TRUE ~ NA_character_),
+         var27 = case_when(plan_cond == "treat" & var27 == "1" ~ "most probably 1 year",
+                                  plan_cond == "treat" & var27 == "2" ~ "most probably 2 years",
+                                  plan_cond == "treat" & var27 == "3" ~ "at least 3 years",
+                                  plan_cond == "treat" & var27 == "4" ~ "definitely not attending",
+                                  plan_cond == "treat" & var27 == "5" ~ "unsure",
+                                  TRUE ~ NA_character_),
+         var28 = case_when(plan_cond == "treat" & var28 == "1" ~ "yes",
+                                  plan_cond == "treat" & var28 == "2" ~ "unsure",
+                                  plan_cond == "treat" & var28 == "3" ~ "no",
+                                  TRUE ~ NA_character_),
+         # code whether the participant's response correctly matched their
+         # scenario condition
+         childPlans_accuracy = case_when(plan_cond == "control" &
+                                           scenario == "4 years certain" &
+                                           var26 == "four or more years" ~ 1,
+                                         plan_cond == "control" &
+                                           scenario == "3 years certain" &
+                                           var26 == "three years" ~ 1,
+                                         plan_cond == "control" &
+                                           scenario == "3 years uncertain" &
+                                           var26 == "three years" ~ 1,
+                                         
+                                         plan_cond == "treat" &
+                                           scenario == "4 years certain" &
+                                           var26 == "yes" ~ 1,
+                                         plan_cond == "treat" &
+                                           scenario == "3 years certain" &
+                                           var26 == "no" &
+                                           var27 == "at least 3 years" &
+                                           var28 == "no" ~ 1,
+                                         plan_cond == "treat" &
+                                           scenario == "3 years uncertain" &
+                                           var26 == "no" &
+                                           var27 == "at least 3 years" &
+                                           var28 %in% c("yes", "unsure") ~ 1,
+                                         
+                                         plan_cond == "control" &
+                                           scenario == "4 years certain" &
+                                           var26 != "four or more years" ~ 0,
+                                         plan_cond == "control" &
+                                           scenario == "3 years certain" &
+                                           var26 != "three years" ~ 0,
+                                         plan_cond == "control" &
+                                           scenario == "3 years uncertain" &
+                                           var26 != "three years" ~ 0,
+                                         
+                                         plan_cond == "treat" &
+                                           scenario == "4 years certain" &
+                                           var26 != "yes" ~ 0,
+                                         plan_cond == "treat" &
+                                           scenario == "3 years certain" &
+                                           (var26 != "no" |
+                                              var27 != "at least 3 years" |
+                                              var28 != "no") ~ 0,
+                                         plan_cond == "treat" &
+                                           scenario == "3 years uncertain" &
+                                           (var26 != "no" |
+                                              var27 != "at least 3 years" |
+                                              var28 %ni% c("yes", "unsure")) ~ 0,
+                                         
+                                         TRUE ~ NA_real_),
+         # the numeric code from Qualtrics mistakenly skips from 10 to 13
+         var4 = case_when(var4 == "13" ~ "11",
+                            TRUE ~ var4),
+         # numeric code from Qualtrics mistakenly skips 2 for the following items
+         var6 = as.numeric(var6),
+         var6 = ifelse(var6 > 1, var6 - 1, var6),
+         var7 = as.numeric(var7),
+         var7 = ifelse(var7 > 1, var7 - 1, var7),
+         var8 = as.numeric(var8),
+         var8 = ifelse(var8 > 1, var8 - 1, var8),
+         var9 = as.numeric(var9),
+         var9 = ifelse(var9 > 1, var9 - 1, var9),
+         var10 = as.numeric(var10),
+         var10 = ifelse(var10 > 1, var10 - 1, var10),
+         # recode so that 0 = no children
+         var3 = as.numeric(var3) - 1,
+         # recode so 17 = "17 or less", 90 = "90 or more", and all other values
+         # reflect the actual age
+         age = as.numeric(age) + 16)
+
+
+# score the comprehension questions
+dat <- dat %>%
+  mutate(var11_correct = case_when(var11 == "2" ~ 1,
+                                          is.na(var11) ~ NA_real_,
+                                          TRUE ~ 0),
+         var12_correct = case_when(var12 == "2" ~ 1,
+                                          is.na(var12) ~ NA_real_,
+                                          TRUE ~ 0),
+         var13_correct = case_when(var13 == "4" ~ 1,
+                                          is.na(var13) ~ NA_real_,
+                                          TRUE ~ 0),
+         var14_correct = case_when(var14 == "1" ~ 1,
+                                          is.na(var14) ~ NA_real_,
+                                          TRUE ~ 0))
+```
+
+# Save processed data
+
+```{r, message=F, warning=F, eval=F}
+write_csv(dat, file.path(outDir, "processed_data.csv"))
+write_csv(dropped_subjects, file.path(outDir,
+                                      "dropped_subjects.csv"))
+```
+
